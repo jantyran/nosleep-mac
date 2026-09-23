@@ -1,6 +1,7 @@
 # Swift build artifacts
 nosleep-mac
 mac-nosleep-app
+.build/
 
 # macOS
 .DS_Store

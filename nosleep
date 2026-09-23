@@ -1,11 +1,8 @@
 #!/usr/bin/env bash
-# ==============================================================================
-# Mac No-Sleep: 蓋（クラムシェル）を閉じてもスリープさせないCLIツール
-# ==============================================================================
+# macOSのスリープ防止セッションを安全に管理するランチャー
 
-set -e
+set -Eeuo pipefail
 
-# シンボリックリンクを解決してスクリプトの実体があるディレクトリを取得
 SOURCE="${BASH_SOURCE[0]}"
 while [ -h "$SOURCE" ]; do
     DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
@@ -14,124 +11,240 @@ while [ -h "$SOURCE" ]; do
 done
 DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
 APP_BIN="${DIR}/nosleep-mac"
+PMSET_BIN="/usr/bin/pmset"
 
-# ヘルプ表示
+STATE_ROOT="${TMPDIR:-/tmp}/nosleep-mac-${UID}"
+STATE_FILE="${STATE_ROOT}/session.env"
+LOCK_DIR="${STATE_ROOT}/lock"
+PID_FILE="${LOCK_DIR}/pid"
+
+POWER_SETTINGS_CHANGED=0
+APP_PID=""
+CAFFEINATE_PID=""
+SUDO_KEEP_PID=""
+
 show_help() {
-    cat << 'EOF'
-  ✦ Mac No-Sleep — 蓋（クラムシェル）閉じスリープ防止ツール
+    cat <<'EOF'
+Usage:
+  nosleep [duration]
+  nosleep [option]
 
-  【概要】
-    MacBookのディスプレイ（蓋）を閉じてもスリープさせず、処理を継続します。
-    指定した時間が経過すると自動解除され、通常の省電力モードに戻ります。
-    Dock、メニューバー、ターミナルで残り時間をリアルタイムに確認・操作できます。
+Examples:
+  nosleep          # 30 minutes (default)
+  nosleep 15m      # 15 minutes
+  nosleep 1h       # 1 hour
+  nosleep 1.5h     # 1 hour 30 minutes
+  nosleep 90s      # 90 seconds
 
-  【使用方法】
-    nosleep [時間]
-    nosleep [オプション]
-
-  【指定例】
-    nosleep            # デフォルト (30分)
-    nosleep 15m        # 15分
-    nosleep 1h         # 1時間
-    nosleep 1.5h       # 1時間30分
-    nosleep 90s        # 90秒
-    nosleep 45         # 45分 (単位なしは分)
-
-  【オプション】
-    -s, --status       現在のスリープ設定（有効/無効）を確認
-    -o, --off, --restore スリープ防止を強制解除（通常スリープに復元）
-    -h, --help         このヘルプを表示
-
-  【解除方法】
-    ・ターミナル: [q] キー または [Ctrl+C]
-    ・Dock: アイコンを右クリック →「× スリープ防止を解除して終了」
-    ・メニューバー: アイコンをクリック →「× スリープ防止を解除して終了」
-    ・別ターミナル: `nosleep --off` を実行
-
+Options:
+  -s, --status          Show the current power settings and session status
+  -o, --off, --restore  Stop the active session and restore saved settings
+  -h, --help            Show this help
 EOF
 }
 
-# 現在のステータス確認
-check_status() {
-    echo "  ○ スリープ設定を確認中..."
-    local sleep_status
-    sleep_status=$(pmset -g | grep -E "SleepDisabled|sleep\b")
-    echo "${sleep_status}"
-    
-    if pmset -g | grep -qi "SleepDisabled.*1"; then
-        echo -e "\n  \033[33m✧ 蓋閉じスリープ防止が【有効】です（Macを閉じてもスリープしません）。\033[0m"
-        echo "    解除コマンド: nosleep --off"
+ensure_state_root() {
+    if [ -e "$STATE_ROOT" ]; then
+        if [ ! -d "$STATE_ROOT" ] || [ ! -O "$STATE_ROOT" ]; then
+            echo "Error: unsafe session state path: $STATE_ROOT" >&2
+            exit 1
+        fi
     else
-        echo -e "\n  \033[32m✓ 通常スリープモードです（Macを閉じると通常通りスリープします）。\033[0m"
+        (umask 077 && mkdir -p "$STATE_ROOT")
     fi
-    exit 0
 }
 
-# 強制解除
-restore_sleep() {
-    echo "  ○ スリープ防止を解除し、通常設定に戻します..."
-    sudo pmset -a disablesleep 0 sleep 1
-    echo -e "  \033[32m✓ スリープ防止を解除しました。Macの蓋を閉じると通常通りスリープします。\033[0m"
-    osascript -e 'display notification "スリープ防止を解除しました。通常通りスリープします。" with title "✦ Mac No-Sleep" sound name "Glass"' 2>/dev/null || true
-    exit 0
+state_value() {
+    local key="$1"
+    [ -f "$STATE_FILE" ] || return 1
+    awk -F= -v key="$key" '$1 == key { print substr($0, length(key) + 2); exit }' "$STATE_FILE"
 }
 
-# 引数チェック
-case "$1" in
+read_pmset_custom_value() {
+    local header="$1"
+    local key="$2"
+    "$PMSET_BIN" -g custom | awk -v header="$header:" -v key="$key" '
+        $0 == header { active = 1; next }
+        /^[^[:space:]].*:$/{ active = 0 }
+        active && $1 == key { print $2; exit }
+    '
+}
+
+read_sleep_disabled() {
+    "$PMSET_BIN" -g | awk '/SleepDisabled/ { print $NF; exit }'
+}
+
+save_power_settings() {
+    local disabled b_sleep c_sleep u_sleep
+    disabled="$(read_sleep_disabled)"
+    b_sleep="$(read_pmset_custom_value "Battery Power" sleep)"
+    c_sleep="$(read_pmset_custom_value "AC Power" sleep)"
+    u_sleep="$(read_pmset_custom_value "UPS Power" sleep)"
+
+    if [ -z "$disabled" ] || { [ -z "$b_sleep" ] && [ -z "$c_sleep" ] && [ -z "$u_sleep" ]; }; then
+        echo "Error: could not snapshot the current power settings; no changes were made." >&2
+        exit 1
+    fi
+
+    (umask 077 && cat >"$STATE_FILE" <<EOF
+pid=$$
+disablesleep=$disabled
+b_sleep=$b_sleep
+c_sleep=$c_sleep
+u_sleep=$u_sleep
+EOF
+    )
+}
+
+restore_power_settings() {
+    local disabled restored=1 profile value
+    disabled="$(state_value disablesleep || true)"
+    if [ -z "$disabled" ]; then
+        echo "Error: saved power settings are incomplete: $STATE_FILE" >&2
+        return 1
+    fi
+
+    for profile in b c u; do
+        value="$(state_value "${profile}_sleep" || true)"
+        if [ -n "$value" ] && ! sudo -n "$PMSET_BIN" "-$profile" sleep "$value"; then
+            restored=0
+        fi
+    done
+    if ! sudo -n "$PMSET_BIN" -a disablesleep "$disabled"; then
+        restored=0
+    fi
+
+    if [ "$restored" -ne 1 ]; then
+        echo "Error: failed to restore one or more power settings. Saved values remain in $STATE_FILE." >&2
+        return 1
+    fi
+}
+
+clear_session_state() {
+    rm -f "$STATE_FILE" "$PID_FILE"
+    rmdir "$LOCK_DIR" 2>/dev/null || true
+    rmdir "$STATE_ROOT" 2>/dev/null || true
+}
+
+acquire_session_lock() {
+    ensure_state_root
+    if mkdir "$LOCK_DIR" 2>/dev/null; then
+        printf '%s\n' "$$" >"$PID_FILE"
+        return
+    fi
+
+    local active_pid
+    active_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+    if [ -n "$active_pid" ] && kill -0 "$active_pid" 2>/dev/null; then
+        echo "Error: nosleep-mac is already running (PID: $active_pid). Use nosleep --off first." >&2
+        exit 1
+    fi
+
+    echo "Error: stale or invalid nosleep-mac session state found at $STATE_ROOT." >&2
+    echo "Run 'nosleep --off' to restore its saved settings before starting a new session." >&2
+    exit 1
+}
+
+check_status() {
+    local active_pid
+    active_pid="$(state_value pid || true)"
+    "$PMSET_BIN" -g
+    if [ -n "$active_pid" ] && kill -0 "$active_pid" 2>/dev/null; then
+        echo "\nnosleep-mac session: active (PID: $active_pid)"
+    else
+        echo "\nnosleep-mac session: inactive"
+    fi
+}
+
+stop_session() {
+    ensure_state_root
+    local active_pid
+    active_pid="$(state_value pid || true)"
+
+    if [ -n "$active_pid" ] && kill -0 "$active_pid" 2>/dev/null; then
+        echo "Stopping nosleep-mac session (PID: $active_pid)..."
+        kill -TERM "$active_pid"
+        return
+    fi
+
+    if [ ! -f "$STATE_FILE" ]; then
+        echo "No nosleep-mac session is active."
+        return
+    fi
+
+    echo "Restoring settings from a stale session..."
+    sudo -v
+    if restore_power_settings; then
+        clear_session_state
+        echo "Power settings restored."
+    fi
+}
+
+cleanup() {
+    local exit_code=$?
+    trap - EXIT INT TERM HUP
+    printf '\033[?25h' 2>/dev/null || true
+
+    if [ -n "$APP_PID" ] && kill -0 "$APP_PID" 2>/dev/null; then
+        kill -TERM "$APP_PID" 2>/dev/null || true
+    fi
+    if [ -n "$CAFFEINATE_PID" ] && kill -0 "$CAFFEINATE_PID" 2>/dev/null; then
+        kill "$CAFFEINATE_PID" 2>/dev/null || true
+    fi
+    if [ -n "$SUDO_KEEP_PID" ] && kill -0 "$SUDO_KEEP_PID" 2>/dev/null; then
+        kill "$SUDO_KEEP_PID" 2>/dev/null || true
+    fi
+
+    if [ "$POWER_SETTINGS_CHANGED" -eq 1 ]; then
+        if restore_power_settings; then
+            clear_session_state
+        else
+            echo "Run 'nosleep --off' after resolving sudo access to restore the saved settings." >&2
+        fi
+    else
+        clear_session_state
+    fi
+    exit "$exit_code"
+}
+
+case "${1:-}" in
     -h|--help)
         show_help
         exit 0
         ;;
     -s|--status)
         check_status
+        exit 0
         ;;
     -o|--off|--restore)
-        restore_sleep
+        stop_session
+        exit 0
         ;;
 esac
 
-# バイナリが存在しない場合はビルド
-if [ ! -f "${APP_BIN}" ]; then
-    echo "  ○ 初回ビルドを実行中..."
-    swiftc -O -o "${APP_BIN}" "${DIR}/src/main.swift"
-    echo "  ✓ ビルドが完了しました。"
+if [ ! -x "$APP_BIN" ]; then
+    echo "Building nosleep-mac..."
+    swiftc -O -o "$APP_BIN" "$DIR"/src/*.swift
 fi
 
-# 管理者権限 (sudo) の確認
-echo "  ○ 電源設定変更のため、管理者パスワードの入力が必要です:"
-if ! sudo -v; then
-    echo "  × 認証に失敗しました。終了します。"
-    exit 1
-fi
+acquire_session_lock
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
 
-# バックグラウンドで sudo 認証を維持
-( while true; do sudo -n true; sleep 60; kill -0 "$$" || exit; done ) 2>/dev/null &
+echo "Administrator authentication is required to change power settings."
+sudo -v
+save_power_settings
+
+(while true; do sudo -n true; sleep 60; kill -0 "$$" || exit; done) 2>/dev/null &
 SUDO_KEEP_PID=$!
 
-# クリーンアップ関数
-cleanup() {
-    local exit_code=$?
-    printf "\033[?25h" 2>/dev/null || true
-    
-    if [ -n "${CAFFEINATE_PID}" ] && kill -0 "${CAFFEINATE_PID}" 2>/dev/null; then
-        kill "${CAFFEINATE_PID}" 2>/dev/null || true
-    fi
+sudo "$PMSET_BIN" -a disablesleep 1 sleep 0
+POWER_SETTINGS_CHANGED=1
 
-    if [ -n "${SUDO_KEEP_PID}" ] && kill -0 "${SUDO_KEEP_PID}" 2>/dev/null; then
-        kill "${SUDO_KEEP_PID}" 2>/dev/null || true
-    fi
-    
-    sudo pmset -a disablesleep 0 sleep 1 2>/dev/null || true
-    exit "${exit_code}"
-}
-trap cleanup EXIT INT TERM HUP
-
-# 1. システムスリープおよびアイドルスリープを完全無効化
-sudo pmset -a disablesleep 1 sleep 0
-
-# 2. caffeinate を二重盾としてバックグラウンド起動 (ディスプレイ・アイドル・システム覚醒を維持)
-caffeinate -disu -w $$ &
+caffeinate -disu -w "$$" &
 CAFFEINATE_PID=$!
 
-# 3. メインアプリケーション（Dock ＆ メニューバー ＆ ターミナルUI ＆ カーネルアサーション）を起動
-"${APP_BIN}" "$@"
+"$APP_BIN" "$@" &
+APP_PID=$!
+wait "$APP_PID"

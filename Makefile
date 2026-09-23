@@ -3,7 +3,7 @@
 # ==============================================================================
 
 APP_NAME = nosleep-mac
-SRC = src/main.swift
+SRC = src/main.swift src/DurationParser.swift
 BIN = $(APP_NAME)
 SCRIPT = nosleep
 
@@ -26,6 +26,11 @@ clean:
 	@echo "🧹 Cleaning build artifacts..."
 	rm -f $(BIN)
 	@echo "Done."
+
+test:
+	@mkdir -p .build
+	@swiftc -o .build/duration-parser-tests src/DurationParser.swift tests/DurationParserTests.swift
+	@.build/duration-parser-tests
 
 status:
 	@./$(SCRIPT) --status

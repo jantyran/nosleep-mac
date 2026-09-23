@@ -617,19 +617,10 @@ class NoSleepApp: NSObject, NSApplicationDelegate {
         fflush(stdout)
 
         sendNotification(title: "✦ Mac No-Sleep 解除", message: reason)
-        executePmsetReenable()
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
             NSApp.terminate(nil)
         }
-    }
-
-    func executePmsetReenable() {
-        let task = Process()
-        task.launchPath = "/usr/bin/sudo"
-        task.arguments = ["-n", "/usr/bin/pmset", "-a", "disablesleep", "0", "sleep", "1"]
-        try? task.run()
-        task.waitUntilExit()
     }
 
     func sendNotification(title: String, message: String) {
@@ -645,67 +636,23 @@ class NoSleepApp: NSObject, NSApplicationDelegate {
 
 var sharedAppInstance: NoSleepApp?
 
-// MARK: - Duration Parser
-func parseDuration() -> Int {
-    let args = CommandLine.arguments
-    if args.count > 1 {
-        let arg = args[1].lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
-        if arg == "-h" || arg == "--help" {
-            print("""
-            使用方法:
-              nosleep [時間]
-              nosleep [オプション]
-
-            指定例:
-              nosleep          # デフォルト (30分)
-              nosleep 15m      # 15分
-              nosleep 1h       # 1時間
-              nosleep 1.5h     # 1時間30分
-              nosleep 90s      # 90秒
-              nosleep 45       # 45分 (単位なしは分)
-              nosleep --status # 現在のスリープ設定を確認
-              nosleep --off    # スリープ防止を強制解除
-            """)
-            exit(0)
-        }
-
-        let pattern = "([0-9]+(?:\\.[0-9]+)?)\\s*(h|m|s)?"
-        if let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) {
-            let nsArg = arg as NSString
-            let matches = regex.matches(in: arg, options: [], range: NSRange(location: 0, length: nsArg.length))
-            
-            var totalSeconds: Double = 0
-            var matchedAny = false
-            
-            for match in matches {
-                guard match.numberOfRanges >= 2 else { continue }
-                let numStr = nsArg.substring(with: match.range(at: 1))
-                guard let val = Double(numStr) else { continue }
-                
-                var unit = "m"
-                if match.numberOfRanges >= 3 && match.range(at: 2).location != NSNotFound {
-                    unit = nsArg.substring(with: match.range(at: 2)).lowercased()
-                }
-                
-                matchedAny = true
-                switch unit {
-                case "h": totalSeconds += val * 3600.0
-                case "m": totalSeconds += val * 60.0
-                case "s": totalSeconds += val
-                default:  totalSeconds += val * 60.0
-                }
-            }
-            
-            if matchedAny && totalSeconds > 0 {
-                return Int(totalSeconds)
-            }
-        }
-    }
-    return 30 * 60
-}
-
 // MARK: - Program Entry
-let duration = parseDuration()
+let args = CommandLine.arguments.dropFirst()
+let duration: Int
+if args.isEmpty {
+    duration = DurationParser.defaultDuration
+} else if args.count == 1, let argument = args.first {
+    switch DurationParser.parse(argument) {
+    case .success(let seconds):
+        duration = seconds
+    case .failure(let error):
+        fputs("Error: \(error.message)\n", stderr)
+        exit(2)
+    }
+} else {
+    fputs("Error: 指定できる時間は1つです。--help を参照してください。\n", stderr)
+    exit(2)
+}
 let app = NSApplication.shared
 app.setActivationPolicy(.regular)
 
