@@ -1,0 +1,28 @@
+name: バグ報告
+description: 再現可能な問題を報告する
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: "セキュリティ上の問題は公開せず、SECURITY.md の手順で報告してください。"
+  - type: textarea
+    id: summary
+    attributes:
+      label: 問題の概要
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 再現手順
+      placeholder: "1. `nosleep 10s` を実行\n2. ..."
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: 実行環境
+      placeholder: "macOSバージョン、Macの機種、電源接続状況"
+    validations:
+      required: true
