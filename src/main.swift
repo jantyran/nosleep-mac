@@ -187,6 +187,7 @@ class NoSleepApp: NSObject, NSApplicationDelegate {
     var isRawModeActive: Bool = false
     var isCleaningUp: Bool = false
     var hasWarned3Min: Bool = false
+    var lastBatteryCheck = Date.distantPast
 
     init(seconds: Int) {
         self.initialDuration = seconds
@@ -446,7 +447,8 @@ class NoSleepApp: NSObject, NSApplicationDelegate {
             }
 
             // 3. バッテリー過放電防止ガード
-            if self.remainingSeconds % 10 == 0 {
+            if Date().timeIntervalSince(self.lastBatteryCheck) >= 10 {
+                self.lastBatteryCheck = Date()
                 if let batt = getCurrentBatteryStatus() {
                     if !batt.isAC && batt.percent <= 10 {
                         self.dispatchTimer?.cancel()
@@ -613,7 +615,7 @@ class NoSleepApp: NSObject, NSApplicationDelegate {
         let bold = "\u{1B}[1m"
         let reset = "\u{1B}[0m"
         print("\r\u{1B}[2K\n\n  \(bold)\(green)✓ \(reason)\(reset)")
-        print("    スリープ防止モードを解除し、通常スリープを再有効化しました。\n")
+        print("    スリープ防止モードを終了します。電源設定はランチャーが復元します。\n")
         fflush(stdout)
 
         sendNotification(title: "✦ Mac No-Sleep 解除", message: reason)

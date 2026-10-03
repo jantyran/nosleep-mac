@@ -1,55 +1,70 @@
 # nosleep-mac
 
-MacBookを一定時間スリープさせないための、macOS専用コマンドラインツールです。蓋を閉じた状態で長時間の処理を継続したいときに、メニューバー、Dock、ターミナルで状態と残り時間を確認できます。
+[![CI](https://github.com/jantyran/nosleep-mac/actions/workflows/ci.yml/badge.svg)](https://github.com/jantyran/nosleep-mac/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+macOS のスリープを指定時間だけ抑止する、メニューバー対応のコマンドラインツールです。長時間のローカル処理を続けたいときに、残り時間をメニューバー・Dock・ターミナルで確認できます。
 
 > [!WARNING]
-> 本ツールは `sudo pmset` でMacの電源設定を変更します。蓋を閉じたまま稼働させると発熱・バッテリー消費が増えます。換気できる場所で使用し、鞄など密閉された場所には絶対に入れないでください。
+> このツールは `sudo pmset` で電源設定を一時変更します。蓋を閉じたまま使用すると発熱とバッテリー消費が増えることがあります。換気できる場所で使用し、稼働中のMacを鞄など密閉された場所に入れないでください。
 
 ## 特長
 
-- 指定時間だけシステム／アイドルスリープを防止し、満了時に起動前の設定へ復元
-- 蓋閉じ時のスリープ防止を試みるシステム設定と、`caffeinate`・IOKitアサーションを併用
-- メニューバー・Dock・ターミナルに残り時間を表示
-- `q`、`Ctrl+C`、Dock／メニューバー、または `nosleep --off` で解除
-- `+` キーまたはメニューから15分・30分・1時間の延長
-- バッテリー駆動時、残量10%以下で自動解除
+- システム／アイドルスリープを指定時間だけ抑止し、終了時に元の設定へ復元
+- `caffeinate`、IOKitアサーション、`pmset` を併用
+- 残り時間をメニューバー、Dock、ターミナルに表示
+- `q`、`Ctrl+C`、メニュー、または `nosleep --off` で安全に解除
+- `+` キーまたはメニューから15分・30分・1時間延長
+- バッテリー残量10%以下で自動解除
 
 ## 動作要件
 
-- macOS（Cocoa、IOKit、`pmset`、`caffeinate` を使用）
+- macOS
 - Xcode Command Line Tools（`swiftc`）
-- 管理者権限（電源設定変更時に `sudo` を使用）
+- 管理者権限（`pmset` の変更時のみ `sudo` を使用）
 
-## クイックスタート
+Xcode Command Line Tools が未導入の場合:
+
+```bash
+xcode-select --install
+```
+
+## インストール
+
+### GitHubから導入する（推奨）
 
 ```bash
 git clone https://github.com/jantyran/nosleep-mac.git
 cd nosleep-mac
-make build
-./nosleep 1h
-```
-
-初回起動時に管理者パスワードを求められます。起動前のスリープ設定を保存し、終了時にその値へ復元します。同時に実行できるセッションは1つです。
-
-### インストール
-
-ローカルコマンドとして使う場合は、シンボリックリンクを作成します。
-
-```bash
 make install
-nosleep 30m
 ```
 
-`/usr/local/bin` に書き込めない場合は `~/.local/bin/nosleep` にリンクします。後者を使う場合は、そのディレクトリを `PATH` に追加してください。
+`make install` は `~/.local/bin` に `nosleep` と実行バイナリをコピーします。開発ディレクトリを削除した後も実行できます。
+
+`~/.local/bin` が `PATH` にない場合は、zshでは次を実行して新しいターミナルを開いてください。
 
 ```bash
-export PATH="$HOME/.local/bin:$PATH"
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
+```
+
+システム全体に導入する場合は、明示的に接頭辞を指定します。
+
+```bash
+sudo make install PREFIX=/usr/local
+```
+
+確認:
+
+```bash
+nosleep --help
 ```
 
 ### アンインストール
 
 ```bash
 make uninstall
+# システム全体に導入した場合
+sudo make uninstall PREFIX=/usr/local
 ```
 
 ## 使い方
@@ -62,63 +77,63 @@ nosleep 1.5h        # 1時間30分
 nosleep 90s         # 90秒
 nosleep 45          # 単位なしは分
 
-nosleep --status    # 現在の電源設定を表示
-nosleep --off       # スリープ防止を強制解除
-nosleep --help      # ヘルプ
+nosleep --status    # 電源設定とセッション状態を表示
+nosleep --off       # 実行中のセッションを停止して設定を復元
+nosleep --help      # ヘルプを表示
 ```
 
-時間は1秒以上、7日以内で指定できます。不正な値はデフォルト値に置き換えず、エラーとして終了します。
+時間は1秒以上、7日以内で指定できます。実行中は `q` または `Ctrl+C` で終了し、`+` で15分延長できます。Dockまたはメニューバーからも状態確認、延長、解除が可能です。
 
-実行中の操作:
+初回実行時には管理者パスワードを求められます。同時に実行できるセッションは1つです。
 
-- `q` または `Ctrl+C`: 解除して終了
-- `+`: 15分延長
-- Dockまたはメニューバー: 残り時間の確認、延長、解除
+## インストール設計
 
-## アーキテクチャ
+`nosleep` は配置先のディレクトリを解決して、同じ場所にある `nosleep-mac` を起動します。そのため、インストール時には次の2ファイルを同じ `bin` ディレクトリへコピーします。
 
 ```text
-nosleep（Bashランチャー）
- ├─ 引数処理・sudo認証の維持
- ├─ pmset: 起動前設定を保存し、蓋閉じ／スリープ関連の設定を変更・復元
- ├─ セッションロック: 同時実行と他セッションの誤解除を防止
- ├─ caffeinate: プロセス存続中のスリープを抑制
- └─ nosleep-mac（Swift / Cocoaアプリ）
-     ├─ IOKit: システム／アイドルスリープ抑制アサーション
-     ├─ DispatchSourceTimer: 残り時間・低残量監視
-     ├─ AppKit: メニューバー、Dock、コンテキストメニュー
-     ├─ Darwin termios: `q`／`+` の即時キーボード入力
-     └─ osascript: macOS通知
+~/.local/bin/
+├── nosleep       # Bashランチャー（PATHから呼び出す入口）
+└── nosleep-mac   # SwiftでビルドしたmacOSアプリ
 ```
 
-| パス | 役割 |
-| --- | --- |
-| `nosleep` | 実行入口。管理者認証、`pmset`、`caffeinate`、Swiftバイナリ起動を担うBashスクリプト。 |
-| `src/main.swift` | UI、タイマー、電源アサーション、通知、キーボード操作を実装する単一のSwiftソース。 |
-| `Makefile` | ビルド、インストール、アンインストール用コマンド。 |
-| `.gitignore` | ローカルビルド成果物およびmacOSメタデータの除外設定。 |
+この構成により、カレントディレクトリやリポジトリの存在に依存せず、PATHが通った任意の場所から `nosleep` を実行できます。アップデート時はリポジトリで `git pull` 後、再度 `make install` を実行してください。
 
 ## 開発
 
 ```bash
 make build      # 最適化ビルド
+make test       # 時間指定パーサーのテスト
 make clean      # ビルド成果物を削除
 make status     # 電源設定を確認
-make off        # スリープ防止を解除
+make off        # 実行中のセッションを解除
 ```
 
-テストフレームワークは現時点では未導入です。変更時は少なくとも `make build` を実行し、短い時間指定（例: `./nosleep 10s`）で起動・終了・設定復元を確認してください。
+開発中は `./nosleep 10s` のような短時間指定で、起動・終了・設定復元を手動確認してください。
 
-## 既知の制約と安全性
+## アーキテクチャ
 
-- `pmset` の挙動はmacOSのバージョン、ハードウェア、MDMなどの組織ポリシーに左右されます。すべてのMacで蓋閉じ時の動作を保証するものではありません。
-- 異常終了、強制終了、電源断時には設定復元が実行されない可能性があります。次回 `nosleep --off` を実行すると、保存済みの起動前設定からの復元を試みます。
-- 本ツールの使用中は、外部ディスプレイや電源接続の有無によってmacOS標準のクラムシェル動作と異なる結果になることがあります。
+```text
+nosleep（Bashランチャー）
+├─ sudo認証、電源設定の保存・変更・復元
+├─ セッションロックと `caffeinate` の管理
+└─ nosleep-mac（Swift / Cocoa）
+   ├─ IOKit: スリープ抑止アサーション
+   ├─ AppKit: メニューバーとDock
+   ├─ DispatchSourceTimer: 残り時間・低残量監視
+   └─ termios: `q`／`+` の入力処理
+```
+
+## 制約と安全性
+
+- 蓋閉じ時の挙動は、macOSのバージョン、機種、外部電源・ディスプレイ、MDMポリシーにより異なり、保証できません。
+- 起動中は `pmset disablesleep` を一時変更します。通常の `sleep` 時間設定は変更しません。
+- 強制終了や電源断では設定復元が行われないことがあります。保存状態が残っている場合は `nosleep --off` を実行してください。
+- `nosleep --status` でセッションが無いのに `SleepDisabled 1` と表示され、保存状態も無い場合、このツールだけでは元の値を特定できません。自身の電源設定を確認してから復旧してください。以前のバージョンは `sleep 0` も設定していました。
 - 機密情報を含む処理を無人で継続しないでください。
 
 ## コントリビュート
 
-IssueとPull Requestを歓迎します。変更は小さく保ち、macOSの電源設定への影響と手動確認結果をPR本文に記載してください。安全性に関する問題は、公開Issueではなくリポジトリ所有者へ非公開で連絡してください。
+貢献方法は [CONTRIBUTING.md](CONTRIBUTING.md) を参照してください。行動規範は [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) です。脆弱性は公開Issueに投稿せず、[SECURITY.md](SECURITY.md) の手順で報告してください。
 
 ## ライセンス
 

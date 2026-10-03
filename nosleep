@@ -75,13 +75,10 @@ read_sleep_disabled() {
 }
 
 save_power_settings() {
-    local disabled b_sleep c_sleep u_sleep
+    local disabled
     disabled="$(read_sleep_disabled)"
-    b_sleep="$(read_pmset_custom_value "Battery Power" sleep)"
-    c_sleep="$(read_pmset_custom_value "AC Power" sleep)"
-    u_sleep="$(read_pmset_custom_value "UPS Power" sleep)"
 
-    if [ -z "$disabled" ] || { [ -z "$b_sleep" ] && [ -z "$c_sleep" ] && [ -z "$u_sleep" ]; }; then
+    if [ "$disabled" != 0 ] && [ "$disabled" != 1 ]; then
         echo "Error: could not snapshot the current power settings; no changes were made." >&2
         exit 1
     fi
@@ -89,31 +86,43 @@ save_power_settings() {
     (umask 077 && cat >"$STATE_FILE" <<EOF
 pid=$$
 disablesleep=$disabled
-b_sleep=$b_sleep
-c_sleep=$c_sleep
-u_sleep=$u_sleep
+sleep_modified=0
 EOF
     )
 }
 
 restore_power_settings() {
-    local disabled restored=1 profile value
+    local disabled restored=1 profile profile_name value sleep_modified
     disabled="$(state_value disablesleep || true)"
-    if [ -z "$disabled" ]; then
+    sleep_modified="$(state_value sleep_modified || true)"
+    if [ "$disabled" != 0 ] && [ "$disabled" != 1 ]; then
         echo "Error: saved power settings are incomplete: $STATE_FILE" >&2
         return 1
     fi
 
-    for profile in b c u; do
-        value="$(state_value "${profile}_sleep" || true)"
-        if [ -n "$value" ] && ! sudo -n "$PMSET_BIN" "-$profile" sleep "$value"; then
-            restored=0
-        fi
-    done
     if ! sudo -n "$PMSET_BIN" -a disablesleep "$disabled"; then
         restored=0
     fi
+    if [ "$sleep_modified" != 0 ]; then
+        for profile in b c u; do
+            case "$profile" in
+                b) profile_name="Battery Power" ;;
+                c) profile_name="AC Power" ;;
+                u) profile_name="UPS Power" ;;
+            esac
+            value="$(state_value "${profile}_sleep" || true)"
+            if [ -n "$value" ] && ! sudo -n "$PMSET_BIN" "-$profile" sleep "$value"; then
+                restored=0
+            fi
+            if [ -n "$value" ] && [ "$(read_pmset_custom_value "$profile_name" sleep)" != "$value" ]; then
+                restored=0
+            fi
+        done
+    fi
 
+    if [ "$restored" -eq 1 ] && [ "$(read_sleep_disabled)" != "$disabled" ]; then
+        restored=0
+    fi
     if [ "$restored" -ne 1 ]; then
         echo "Error: failed to restore one or more power settings. Saved values remain in $STATE_FILE." >&2
         return 1
@@ -146,29 +155,44 @@ acquire_session_lock() {
 }
 
 check_status() {
-    local active_pid
+    local active_pid disabled
     active_pid="$(state_value pid || true)"
+    disabled="$(read_sleep_disabled)"
     "$PMSET_BIN" -g
     if [ -n "$active_pid" ] && kill -0 "$active_pid" 2>/dev/null; then
-        echo "\nnosleep-mac session: active (PID: $active_pid)"
+        printf '\nnosleep-mac session: active (PID: %s)\n' "$active_pid"
     else
-        echo "\nnosleep-mac session: inactive"
+        printf '\nnosleep-mac session: inactive\n'
+        if [ -f "$STATE_FILE" ]; then
+            echo "Saved settings need restoration: nosleep --off"
+        elif [ "$disabled" = 1 ]; then
+            echo "Warning: system sleep is disabled, but no nosleep session snapshot exists."
+        fi
     fi
 }
 
 stop_session() {
     ensure_state_root
-    local active_pid
+    local active_pid attempt
     active_pid="$(state_value pid || true)"
 
     if [ -n "$active_pid" ] && kill -0 "$active_pid" 2>/dev/null; then
         echo "Stopping nosleep-mac session (PID: $active_pid)..."
         kill -TERM "$active_pid"
-        return
+        for ((attempt=0; attempt<300; attempt++)); do
+            [ ! -f "$STATE_FILE" ] && return 0
+            sleep 0.1
+        done
+        echo "Error: session did not restore its power settings. Check 'nosleep --status'." >&2
+        return 1
     fi
 
     if [ ! -f "$STATE_FILE" ]; then
-        echo "No nosleep-mac session is active."
+        echo "No nosleep-mac session snapshot exists; power settings were not changed."
+        if [ "$(read_sleep_disabled)" = 1 ]; then
+            echo "Warning: system sleep is disabled. Check your power settings manually."
+            return 1
+        fi
         return
     fi
 
@@ -177,6 +201,8 @@ stop_session() {
     if restore_power_settings; then
         clear_session_state
         echo "Power settings restored."
+    else
+        return 1
     fi
 }
 
@@ -198,8 +224,10 @@ cleanup() {
     if [ "$POWER_SETTINGS_CHANGED" -eq 1 ]; then
         if restore_power_settings; then
             clear_session_state
+            echo "Power settings restored."
         else
             echo "Run 'nosleep --off' after resolving sudo access to restore the saved settings." >&2
+            exit_code=1
         fi
     else
         clear_session_state
@@ -239,8 +267,8 @@ save_power_settings
 (while true; do sudo -n true; sleep 60; kill -0 "$$" || exit; done) 2>/dev/null &
 SUDO_KEEP_PID=$!
 
-sudo "$PMSET_BIN" -a disablesleep 1 sleep 0
 POWER_SETTINGS_CHANGED=1
+sudo "$PMSET_BIN" -a disablesleep 1
 
 caffeinate -disu -w "$$" &
 CAFFEINATE_PID=$!

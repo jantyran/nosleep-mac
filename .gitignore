@@ -5,3 +5,7 @@ mac-nosleep-app
 
 # macOS
 .DS_Store
+
+# Editor and test output
+.swiftpm/
+coverage/
